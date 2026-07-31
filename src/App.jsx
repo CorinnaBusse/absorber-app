@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import ohmLogo from "./assets/ohm-logo.svg";
 import {
   ComposedChart, Scatter, XAxis, YAxis, CartesianGrid,
-  ResponsiveContainer, ReferenceLine, Tooltip,
+  ResponsiveContainer, ReferenceLine, ReferenceArea, Tooltip,
 } from "recharts";
 
 /* ---------------------------------------------------------------------
@@ -40,11 +39,12 @@ function makeGaussian(rng) {
   };
 }
 
+function de(v, d = 2) { return (isFinite(v) ? v.toFixed(d) : "—").replace(".", ","); }
 function fmtTime(s) {
   if (!isFinite(s)) return "—";
-  if (s < 60) return `${s.toFixed(1)} s`;
-  if (s < 3600) return `${(s / 60).toFixed(2)} min`;
-  return `${(s / 3600).toFixed(2)} h`;
+  if (s < 60) return `${de(s, 1)} s`;
+  if (s < 3600) return `${de(s / 60, 2)} min`;
+  return `${de(s / 3600, 2)} h`;
 }
 function hexToRgb(hex) {
   const m = hex.replace("#", "");
@@ -62,21 +62,6 @@ function kremserYOut(yIn, L, G, m, N) {
   const A = L / (m * G);
   if (Math.abs(A - 1) < 1e-6) return yIn / (N + 1);
   return (yIn * (A - 1)) / (Math.pow(A, N + 1) - 1);
-}
-
-/* Realer Verteilungskoeffizient m(T) für CO2/Wasser aus Henry-Gesetz-Daten
-   (Sander, "Compilation of Henry's Law Constants", 2015):
-   H_cp(25°C) = 3.3e-4 mol/(m3·Pa), van-'t-Hoff-Parameter C = 2400 K.
-   m = c_Gas/c_Fl (dimensionslos) = 1/(H_cp(T)·R·T) */
-function henryM_CO2_H2O(TCelsius) {
-  const R = 8.314;        // J/(mol·K)
-  const T0 = 298.15;      // K (Referenz 25°C)
-  const Hcp0 = 3.3e-4;    // mol/(m3·Pa) bei T0
-  const C = 2400;         // K, van't-Hoff-Konstante CO2
-  const T = TCelsius + 273.15;
-  const Hcp = Hcp0 * Math.exp(C * (1 / T - 1 / T0));
-  const Hcc = Hcp * R * T; // dimensionslos, c_Fl/c_Gas
-  return 1 / Hcc;
 }
 const logToPos = (val, min, max) => (100 * Math.log(val / min)) / Math.log(max / min);
 const posToLog = (pos, min, max) => min * Math.pow(max / min, pos / 100);
@@ -155,13 +140,13 @@ function ColumnGraphic({ xArr, xMaxRef, yOut, yIn, running }) {
       <line x1={colX + colW / 2} y1={colY} x2={colX + colW / 2} y2={0} stroke={PIPE} strokeWidth={8} />
       <polygon points={`${colX + colW / 2 - 5},${colY - 20} ${colX + colW / 2 + 5},${colY - 20} ${colX + colW / 2},${colY - 30}`} fill={OHM_RED} opacity={running ? 1 : 0.3} />
       <text x={colX + colW / 2} y={12} textAnchor="middle" fontFamily={SANS} fontWeight="700" fontSize="11" fill={OHM_RED}>
-        Abluft: {yOut.toFixed(2)} %
+        Abluft: {yOut.toFixed(2).replace(".", ",")} %
       </text>
 
       {/* Flüssigkeitsablauf unten (Sumpf) */}
       <line x1={colX + colW / 2} y1={colY + colH} x2={colX + colW / 2} y2={300} stroke={PIPE} strokeWidth={8} />
       <text x={colX + colW / 2} y={314} textAnchor="middle" fontFamily={SANS} fontWeight="700" fontSize="11" fill={OHM_BLUE}>
-        Rohgas: {yIn.toFixed(2)} %
+        Rohgas: {yIn.toFixed(2).replace(".", ",")} %
       </text>
     </svg>
   );
@@ -175,22 +160,24 @@ export default function AbsorptionColumn() {
   const [G, setG] = useState(100);       // Luftvolumenstrom in m3/h
   const [L, setL] = useState(10);        // Wasservolumenstrom in m3/h
   const [Qco2, setQco2] = useState(5);   // CO2-Volumenstrom in m3/h
-  const [T, setT] = useState(25);        // Wassertemperatur in °C
-  const m = henryM_CO2_H2O(T);           // Verteilungskoeffizient (real, aus Henry-Gesetz CO2/Wasser)
+  const [m, setM] = useState(0.3);       // Verteilungskoeffizient (dimensionslos)
   const [noisePct, setNoisePct] = useState(3);
   const [sampleInterval, setSampleInterval] = useState(8);
   const [speed, setSpeed] = useState(1);
-  const [eulerRatio, setEulerRatio] = useState(0.1);
   const [running, setRunning] = useState(false);
   const [locked, setLocked] = useState(false); // Anzahl Trennstufen gesperrt nach Start
   const [, setTick] = useState(0);
+  const [zoomDomain, setZoomDomain] = useState(null); // [min,max] oder null = live
+  const [refAreaLeft, setRefAreaLeft] = useState(null);
+  const [refAreaRight, setRefAreaRight] = useState(null);
 
   const paramsRef = useRef({});
-  paramsRef.current = { N, G, L, Qco2, T, m, noisePct, sampleInterval, speed, eulerRatio };
+  paramsRef.current = { N, G, L, Qco2, m, noisePct, sampleInterval, speed };
 
   const elapsedRef = useRef(0);
   const xArrRef = useRef(new Array(N).fill(0));
   const noisyRef = useRef([]);
+  const fullLogRef = useRef([]);
   const lastSampleRef = useRef(0);
   const gaussRef = useRef(makeGaussian(mulberry32(Date.now() % 1e6)));
   const windowWidthRef = useRef(60);
@@ -207,7 +194,7 @@ export default function AbsorptionColumn() {
     elapsedRef.current = 0;
     xArrRef.current = new Array(p.N).fill(0);
     noisyRef.current = [];
-    lastSampleRef.current = 0;
+    fullLogRef.current = [];
     gaussRef.current = makeGaussian(mulberry32(Date.now() % 1e6));
     windowWidthRef.current = estimateWindow(p);
     unstableRef.current = false;
@@ -229,7 +216,7 @@ export default function AbsorptionColumn() {
       const t = elapsedRef.current;
 
       const rate = (p.L + p.G * p.m) / H_L;
-      const subDt = p.eulerRatio / rate;
+      const subDt = 0.1 / rate;
       const steps = Math.min(3000, Math.max(1, Math.round(dtSim / subDt)));
       const actualSub = dtSim / steps;
       const yIn = (p.Qco2 / (p.Qco2 + p.G)) * 100;
@@ -252,10 +239,10 @@ export default function AbsorptionColumn() {
       if (t - lastSampleRef.current >= p.sampleInterval) {
         const noiseAbs = (p.noisePct / 100) * yIn;
         const measured = Math.max(0, yOut + noiseAbs * gaussRef.current());
-        const arr = noisyRef.current;
-        arr.push({ t, measured, model: yOut });
         const minKeep = t - windowWidthRef.current * 1.5;
-        while (arr.length > 2 && arr[0].t < minKeep) arr.shift();
+        noisyRef.current = noisyRef.current.filter((pt) => pt.t >= minKeep);
+        noisyRef.current.push({ t, measured, model: yOut });
+        fullLogRef.current.push({ t, measured, model: yOut });
         lastSampleRef.current = t;
       }
 
@@ -279,13 +266,13 @@ export default function AbsorptionColumn() {
     const p = paramsRef.current;
     const meta = [
       `# Absorptions-Monitor Messexport`,
-      `# N=${p.N}; Luft_G=${p.G} m3/h; Wasser_L=${p.L} m3/h; CO2_Q=${p.Qco2} m3/h; T=${p.T}°C; m=${p.m}`,
+      `# N=${p.N}; Luft_G=${p.G} m3/h; Wasser_L=${p.L} m3/h; CO2_Q=${p.Qco2} m3/h; m=${p.m}`,
       `# Messrauschen=${p.noisePct}%; Messintervall=${p.sampleInterval}s`,
-      `# y_ein=${yIn.toFixed(4)}%; Kremser_y_aus=${yEq.toFixed(5)}%`,
+      `# y_ein=${yIn.toFixed(4).replace(".", ",")}%; Kremser_y_aus=${yEq.toFixed(5).replace(".", ",")}%`,
       `# Zeitpunkt: ${new Date().toLocaleString("de-DE")}`,
       ``,
       `Zeit_s;CO2_Abluft_gemessen_Prozent;CO2_Abluft_Modell_Prozent`,
-      ...noisyRef.current.map((pt) => `${csvNum(pt.t)};${csvNum(pt.measured)};${csvNum(pt.model)}`),
+      ...fullLogRef.current.map((pt) => `${csvNum(pt.t)};${csvNum(pt.measured)};${csvNum(pt.model)}`),
       ``,
       `Stufenprofil_aktuell (1=unten/Sumpf ... N=oben/Abluft)`,
       `Stufe;CO2_in_Wasser_Prozent`,
@@ -306,6 +293,31 @@ export default function AbsorptionColumn() {
   const elapsed = elapsedRef.current;
   const ww = windowWidthRef.current;
   const xDomain = elapsed <= ww ? [0, ww] : [elapsed - ww, elapsed];
+  const displayDomain = zoomDomain || xDomain;
+
+  const handleChartMouseDown = (e) => { if (e && e.activeLabel !== undefined) { setRefAreaLeft(e.activeLabel); setRefAreaRight(e.activeLabel); } };
+  const handleChartMouseMove = (e) => { if (refAreaLeft !== null && e && e.activeLabel !== undefined) setRefAreaRight(e.activeLabel); };
+  const handleChartMouseUp = () => {
+    if (refAreaLeft !== null && refAreaRight !== null && refAreaLeft !== refAreaRight) {
+      setZoomDomain([Math.min(refAreaLeft, refAreaRight), Math.max(refAreaLeft, refAreaRight)]);
+    }
+    setRefAreaLeft(null); setRefAreaRight(null);
+  };
+  const resetZoom = () => setZoomDomain(null);
+  const handleWheelZoom = (e) => {
+    e.preventDefault();
+    const cur = zoomDomain || xDomain;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const anchor = cur[0] + frac * (cur[1] - cur[0]);
+    const factor = e.deltaY > 0 ? 1.25 : 0.8;
+    let newMin = anchor - (anchor - cur[0]) * factor;
+    let newMax = anchor + (cur[1] - anchor) * factor;
+    const fullSpan = xDomain[1] - xDomain[0];
+    if (newMax - newMin >= fullSpan * 0.999) { setZoomDomain(null); return; }
+    if (newMax - newMin < fullSpan * 0.005) return;
+    setZoomDomain([newMin, newMax]);
+  };
   const yIn = (Qco2 / (Qco2 + G)) * 100;
   const yOutNow = m * xArrRef.current[N - 1];
   const xSumpf = xArrRef.current[0];
@@ -326,7 +338,7 @@ export default function AbsorptionColumn() {
     return (
       <div style={{ background: PANEL, border: `1px solid ${PANEL_BORDER}`, borderRadius: 4, padding: "6px 10px", fontFamily: MONO, fontSize: 11, color: INK, boxShadow: "0 2px 6px rgba(0,0,0,0.12)" }}>
         <div style={{ opacity: 0.6, marginBottom: 4 }}>t = {fmtTime(label)}</div>
-        {row && <div style={{ color: OHM_RED, fontWeight: 700 }}>Messung = {row.value?.toFixed(4)} %</div>}
+        {row && <div style={{ color: OHM_RED, fontWeight: 700 }}>Messung = {de(row.value, 2)} %</div>}
       </div>
     );
   };
@@ -354,7 +366,9 @@ export default function AbsorptionColumn() {
         <div className="flex items-end justify-between flex-wrap gap-3 pb-3" style={{ borderBottom: `3px solid ${OHM_RED}` }}>
           <div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-              <img src={ohmLogo} alt="die Ohm" style={{ height: 36, width: "auto" }} />
+              <span style={{ fontFamily: SANS, fontWeight: 800, fontSize: 13, color: "#fff", background: OHM_RED, padding: "2px 8px", borderRadius: 3, letterSpacing: "0.04em" }}>
+                die Ohm
+              </span>
               <h1 style={{ fontFamily: SANS, fontWeight: 800, fontSize: "clamp(24px,3.4vw,34px)", color: INK, letterSpacing: "-0.01em", lineHeight: 1 }}>
                 ABSORPTIONS·MONITOR
               </h1>
@@ -385,32 +399,31 @@ export default function AbsorptionColumn() {
             </PanelBox>
 
             <PanelBox title="Ströme (live änderbar)">
-              <Field label="Luftvolumenstrom G" value={`${G.toFixed(0)} m³/h`}>
+              <Field label="Luftvolumenstrom G" value={`${G.toFixed(0).replace(".", ",")} m³/h`}>
                 <LinearSlider min={20} max={300} step={5} value={G} onChange={setG} />
               </Field>
-              <Field label="Wasservolumenstrom L" value={`${L.toFixed(1)} m³/h`}>
+              <Field label="Wasservolumenstrom L" value={`${L.toFixed(1).replace(".", ",")} m³/h`}>
                 <LinearSlider min={1} max={50} step={0.5} value={L} onChange={setL} />
               </Field>
-              <Field label="CO₂-Volumenstrom" value={`${Qco2.toFixed(2)} m³/h`}>
+              <Field label="CO₂-Volumenstrom" value={`${Qco2.toFixed(2).replace(".", ",")} m³/h`}>
                 <LogSlider min={0.2} max={30} value={Qco2} onChange={setQco2} />
               </Field>
               <div style={{ fontFamily: SANS, fontSize: 11, color: GRAY }}>
-                y_ein = CO₂/(CO₂+Luft) = {yIn.toFixed(2)} % — Rohgas-Zusammensetzung.
+                y_ein = CO₂/(CO₂+Luft) = {yIn.toFixed(2).replace(".", ",")} % — Rohgas-Zusammensetzung.
               </div>
             </PanelBox>
 
             <PanelBox title="Gleichgewicht">
-              <Field label="Wassertemperatur T" value={`${T.toFixed(0)} °C`}>
-                <LinearSlider min={0} max={45} step={1} value={T} onChange={setT} />
+              <Field label="Verteilungskoeffizient m (dimensionslos)" value={m.toFixed(2).replace(".", ",")}>
+                <LogSlider min={0.05} max={2} value={m} onChange={setM} />
               </Field>
               <div style={{ fontFamily: SANS, fontSize: 11, color: GRAY }}>
-                y* = m·x, beide in % (Henry-Gesetz). m(T) = {m.toFixed(2)} — reale Henry-Daten für CO₂/Wasser
-                (Sander 2015), van-'t-Hoff-Temperaturabhängigkeit. Wärmer = schlechter löslich (größeres m).
+                y* = m·x, beide in % (vereinfachtes Henry-Gesetz). Kleiner m = bessere Löslichkeit.
               </div>
             </PanelBox>
 
             <PanelBox title="Messung">
-              <Field label="Messrauschen (σ)" value={`± ${noisePct.toFixed(1)} % (rel. y_ein)`}>
+              <Field label="Messrauschen (σ)" value={`± ${noisePct.toFixed(1).replace(".", ",")} % (rel. y_ein)`}>
                 <LinearSlider min={0} max={15} step={0.5} value={noisePct} onChange={setNoisePct} />
               </Field>
               <Field label="Messintervall" value={fmtTime(sampleInterval)}>
@@ -419,14 +432,11 @@ export default function AbsorptionColumn() {
             </PanelBox>
 
             <PanelBox title="Zeitraffer &amp; Integration">
-              <Field label="Beschleunigung" value={`× ${speed.toFixed(0)}`}>
+              <Field label="Beschleunigung" value={`× ${speed.toFixed(0).replace(".", ",")}`}>
                 <LogSlider min={1} max={2000} value={speed} onChange={setSpeed} />
               </Field>
-              <Field label="Schrittweite (Rate·Δt)" value={eulerRatio.toFixed(2)}>
-                <LogSlider min={0.01} max={2.5} value={eulerRatio} onChange={setEulerRatio} />
-              </Field>
               <div style={{ fontFamily: SANS, fontSize: 11, color: unstableRef.current ? OHM_RED : GRAY, fontWeight: unstableRef.current ? 700 : 400 }}>
-                {unstableRef.current ? "⚠ Schrittweite zu groß — numerisch instabil." : "Kleiner = genauer/stabiler."}
+                {unstableRef.current ? "⚠ numerisch instabil." : "Integration läuft mit fest eingestellter, stabiler Schrittweite."}
               </div>
             </PanelBox>
           </div>
@@ -455,24 +465,41 @@ export default function AbsorptionColumn() {
           <div className="lg:col-span-5 flex flex-col gap-3">
             <div style={{ position: "relative", background: CHART_BG, border: `1px solid ${PANEL_BORDER}`, borderRadius: 8,
               boxShadow: "0 1px 3px rgba(0,0,0,0.05)", padding: "10px 6px 4px 0" }}>
-              <div style={{ width: "100%", height: 300 }}>
+              <div className="flex items-center justify-between" style={{ padding: "0 10px", marginBottom: 2 }}>
+                <span style={{ fontFamily: SANS, fontWeight: 700, fontSize: 11.5, color: INK, textTransform: "uppercase", letterSpacing: "0.03em" }}>
+                  CO₂ in Abluft über Zeit
+                </span>
+                {zoomDomain && (
+                  <button onClick={resetZoom} className="ohm-btn" style={{ fontFamily: MONO, fontSize: 10.5, background: "#fff", border: `1px solid ${PANEL_BORDER}`, borderRadius: 4, padding: "3px 8px", color: OHM_RED }}>
+                    ⤾ Zoom zurücksetzen
+                  </button>
+                )}
+              </div>
+              <div style={{ width: "100%", height: 300 }} onWheel={handleWheelZoom}>
                 <ResponsiveContainer>
-                  <ComposedChart margin={{ top: 10, right: 18, bottom: 22, left: 28 }}>
+                  <ComposedChart margin={{ top: 10, right: 18, bottom: 22, left: 28 }}
+                    onMouseDown={handleChartMouseDown} onMouseMove={handleChartMouseMove} onMouseUp={handleChartMouseUp}>
                     <CartesianGrid stroke={CHART_GRID} strokeDasharray="2 4" />
-                    <XAxis dataKey="t" type="number" domain={xDomain} allowDataOverflow
+                    <XAxis dataKey="t" type="number" domain={displayDomain} allowDataOverflow
                       tickFormatter={(v) => fmtTime(v)} stroke={GRAY} tick={{ fontFamily: MONO, fontSize: 11, fill: GRAY }}
                       label={{ value: "Zeit", position: "insideBottom", offset: -14, fill: GRAY, fontSize: 12, fontFamily: SANS, fontWeight: 600 }} />
                     <YAxis type="number" domain={[0, yMax]} allowDataOverflow stroke={GRAY} tick={{ fontFamily: MONO, fontSize: 11, fill: GRAY }}
-                      tickFormatter={(v) => v.toFixed(2)}
-                      width={64}
-                      label={{ value: "CO₂ in Abluft (%)", angle: -90, position: "insideLeft", offset: 12, fill: INK, fontSize: 12.5, fontFamily: SANS, fontWeight: 600 }} />
+                      width={64} tickFormatter={(v) => de(v, 2)}
+                      label={{ value: "CO₂ in Abluft / %", angle: -90, position: "insideLeft", offset: 12, fill: INK, fontSize: 12.5, fontFamily: SANS, fontWeight: 600, style: { textAnchor: "middle" } }} />
                     <Tooltip content={<CustomTooltip />} />
                     <Scatter data={noisyRef.current} dataKey="measured" fill={OHM_RED} fillOpacity={0.85} isAnimationActive={false} shape="circle" r={3} name="Messung" />
                     <ReferenceLine y={yEq} stroke={OHM_BLUE} strokeDasharray="5 4" strokeOpacity={0.7} />
+                    {refAreaLeft !== null && refAreaRight !== null && (
+                      <ReferenceArea x1={refAreaLeft} x2={refAreaRight} strokeOpacity={0.3} fill={OHM_BLUE} fillOpacity={0.12} />
+                    )}
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
+              <div style={{ fontFamily: SANS, fontSize: 10, color: GRAY, padding: "2px 10px 6px" }}>
+                Ziehen = Bereich hineinzoomen, Mausrad = rein/raus zoomen.
+              </div>
             </div>
+
             <div style={{ fontFamily: SANS, fontSize: 11, color: GRAY, paddingLeft: 4 }}>
               Blau gestrichelt = Kremser-Gleichgewichtswert (stationär, live nachgerechnet). Y-Achse skaliert automatisch auf den beobachteten Bereich.
             </div>
@@ -482,14 +509,14 @@ export default function AbsorptionColumn() {
                 <div style={{ fontFamily: MONO, fontSize: 16, color: INK, fontWeight: 700 }}>{fmtTime(elapsed)}</div>
               </PanelBox>
               <PanelBox title="Abluft (Ist)">
-                <div style={{ fontFamily: MONO, fontSize: 16, color: OHM_RED, fontWeight: 700 }}>{yOutNow.toFixed(3)} %</div>
+                <div style={{ fontFamily: MONO, fontSize: 16, color: OHM_RED, fontWeight: 700 }}>{yOutNow.toFixed(3).replace(".", ",")} %</div>
               </PanelBox>
               <PanelBox title="Abluft (Kremser)">
-                <div style={{ fontFamily: MONO, fontSize: 16, color: OHM_BLUE, fontWeight: 700 }}>{yEq.toFixed(3)} %</div>
+                <div style={{ fontFamily: MONO, fontSize: 16, color: OHM_BLUE, fontWeight: 700 }}>{yEq.toFixed(3).replace(".", ",")} %</div>
                 <div style={{ fontFamily: MONO, fontSize: 10.5, color: GRAY }}>stationärer Zielwert</div>
               </PanelBox>
               <PanelBox title="Sumpf (Wasser)">
-                <div style={{ fontFamily: MONO, fontSize: 16, color: INK, fontWeight: 700 }}>{xSumpf.toFixed(3)}</div>
+                <div style={{ fontFamily: MONO, fontSize: 16, color: INK, fontWeight: 700 }}>{xSumpf.toFixed(3).replace(".", ",")}</div>
                 <div style={{ fontFamily: MONO, fontSize: 10.5, color: GRAY }}>% CO₂ im Wasser</div>
               </PanelBox>
             </div>

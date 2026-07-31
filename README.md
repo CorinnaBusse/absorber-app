@@ -1,4 +1,4 @@
-# Tank·Monitor — Füllstandssimulation
+# Absorber — Simulation
 
 Live-Simulation einer Rektifikation nur Verstärkungsteil (live Euler-Integration) im Ohm-Corporate-Design.
 

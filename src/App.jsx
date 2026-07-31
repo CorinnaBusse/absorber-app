@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import ohmLogo from "./assets/ohm-logo.svg";
 import {
   ComposedChart, Scatter, XAxis, YAxis, CartesianGrid,
   ResponsiveContainer, ReferenceLine, Tooltip,
@@ -61,6 +62,21 @@ function kremserYOut(yIn, L, G, m, N) {
   const A = L / (m * G);
   if (Math.abs(A - 1) < 1e-6) return yIn / (N + 1);
   return (yIn * (A - 1)) / (Math.pow(A, N + 1) - 1);
+}
+
+/* Realer Verteilungskoeffizient m(T) für CO2/Wasser aus Henry-Gesetz-Daten
+   (Sander, "Compilation of Henry's Law Constants", 2015):
+   H_cp(25°C) = 3.3e-4 mol/(m3·Pa), van-'t-Hoff-Parameter C = 2400 K.
+   m = c_Gas/c_Fl (dimensionslos) = 1/(H_cp(T)·R·T) */
+function henryM_CO2_H2O(TCelsius) {
+  const R = 8.314;        // J/(mol·K)
+  const T0 = 298.15;      // K (Referenz 25°C)
+  const Hcp0 = 3.3e-4;    // mol/(m3·Pa) bei T0
+  const C = 2400;         // K, van't-Hoff-Konstante CO2
+  const T = TCelsius + 273.15;
+  const Hcp = Hcp0 * Math.exp(C * (1 / T - 1 / T0));
+  const Hcc = Hcp * R * T; // dimensionslos, c_Fl/c_Gas
+  return 1 / Hcc;
 }
 const logToPos = (val, min, max) => (100 * Math.log(val / min)) / Math.log(max / min);
 const posToLog = (pos, min, max) => min * Math.pow(max / min, pos / 100);
@@ -159,7 +175,8 @@ export default function AbsorptionColumn() {
   const [G, setG] = useState(100);       // Luftvolumenstrom in m3/h
   const [L, setL] = useState(10);        // Wasservolumenstrom in m3/h
   const [Qco2, setQco2] = useState(5);   // CO2-Volumenstrom in m3/h
-  const [m, setM] = useState(0.3);       // Verteilungskoeffizient (dimensionslos)
+  const [T, setT] = useState(25);        // Wassertemperatur in °C
+  const m = henryM_CO2_H2O(T);           // Verteilungskoeffizient (real, aus Henry-Gesetz CO2/Wasser)
   const [noisePct, setNoisePct] = useState(3);
   const [sampleInterval, setSampleInterval] = useState(8);
   const [speed, setSpeed] = useState(1);
@@ -169,7 +186,7 @@ export default function AbsorptionColumn() {
   const [, setTick] = useState(0);
 
   const paramsRef = useRef({});
-  paramsRef.current = { N, G, L, Qco2, m, noisePct, sampleInterval, speed, eulerRatio };
+  paramsRef.current = { N, G, L, Qco2, T, m, noisePct, sampleInterval, speed, eulerRatio };
 
   const elapsedRef = useRef(0);
   const xArrRef = useRef(new Array(N).fill(0));
@@ -262,7 +279,7 @@ export default function AbsorptionColumn() {
     const p = paramsRef.current;
     const meta = [
       `# Absorptions-Monitor Messexport`,
-      `# N=${p.N}; Luft_G=${p.G} m3/h; Wasser_L=${p.L} m3/h; CO2_Q=${p.Qco2} m3/h; m=${p.m}`,
+      `# N=${p.N}; Luft_G=${p.G} m3/h; Wasser_L=${p.L} m3/h; CO2_Q=${p.Qco2} m3/h; T=${p.T}°C; m=${p.m}`,
       `# Messrauschen=${p.noisePct}%; Messintervall=${p.sampleInterval}s`,
       `# y_ein=${yIn.toFixed(4)}%; Kremser_y_aus=${yEq.toFixed(5)}%`,
       `# Zeitpunkt: ${new Date().toLocaleString("de-DE")}`,
@@ -337,9 +354,7 @@ export default function AbsorptionColumn() {
         <div className="flex items-end justify-between flex-wrap gap-3 pb-3" style={{ borderBottom: `3px solid ${OHM_RED}` }}>
           <div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-              <span style={{ fontFamily: SANS, fontWeight: 800, fontSize: 13, color: "#fff", background: OHM_RED, padding: "2px 8px", borderRadius: 3, letterSpacing: "0.04em" }}>
-                die Ohm
-              </span>
+              <img src={ohmLogo} alt="die Ohm" style={{ height: 36, width: "auto" }} />
               <h1 style={{ fontFamily: SANS, fontWeight: 800, fontSize: "clamp(24px,3.4vw,34px)", color: INK, letterSpacing: "-0.01em", lineHeight: 1 }}>
                 ABSORPTIONS·MONITOR
               </h1>
@@ -385,11 +400,12 @@ export default function AbsorptionColumn() {
             </PanelBox>
 
             <PanelBox title="Gleichgewicht">
-              <Field label="Verteilungskoeffizient m (dimensionslos)" value={m.toFixed(2)}>
-                <LogSlider min={0.05} max={2} value={m} onChange={setM} />
+              <Field label="Wassertemperatur T" value={`${T.toFixed(0)} °C`}>
+                <LinearSlider min={0} max={45} step={1} value={T} onChange={setT} />
               </Field>
               <div style={{ fontFamily: SANS, fontSize: 11, color: GRAY }}>
-                y* = m·x, beide in % (vereinfachtes Henry-Gesetz). Kleiner m = bessere Löslichkeit.
+                y* = m·x, beide in % (Henry-Gesetz). m(T) = {m.toFixed(2)} — reale Henry-Daten für CO₂/Wasser
+                (Sander 2015), van-'t-Hoff-Temperaturabhängigkeit. Wärmer = schlechter löslich (größeres m).
               </div>
             </PanelBox>
 
@@ -447,6 +463,7 @@ export default function AbsorptionColumn() {
                       tickFormatter={(v) => fmtTime(v)} stroke={GRAY} tick={{ fontFamily: MONO, fontSize: 11, fill: GRAY }}
                       label={{ value: "Zeit", position: "insideBottom", offset: -14, fill: GRAY, fontSize: 12, fontFamily: SANS, fontWeight: 600 }} />
                     <YAxis type="number" domain={[0, yMax]} allowDataOverflow stroke={GRAY} tick={{ fontFamily: MONO, fontSize: 11, fill: GRAY }}
+                      tickFormatter={(v) => v.toFixed(2)}
                       width={64}
                       label={{ value: "CO₂ in Abluft (%)", angle: -90, position: "insideLeft", offset: 12, fill: INK, fontSize: 12.5, fontFamily: SANS, fontWeight: 600 }} />
                     <Tooltip content={<CustomTooltip />} />
